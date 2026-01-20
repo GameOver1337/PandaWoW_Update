@@ -37,6 +37,7 @@ class ProxyDownloader:
     
     PROXY_LIST_SOCKS5_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.json"
     PROXY_LIST_SOCKS4_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.json"
+    PROXY_CACHE_FILE = "PandaWoW_Update.json"
     
     def __init__(self, proxy_url: Optional[str] = None, log_handler: Optional[LogHandler] = None):
         """
@@ -70,6 +71,56 @@ class ProxyDownloader:
         
         return session
     
+    def load_cached_proxy(self) -> Optional[Dict]:
+        """Загрузка сохраненного прокси из кэша"""
+        try:
+            if os.path.exists(self.PROXY_CACHE_FILE):
+                with open(self.PROXY_CACHE_FILE, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    
+                # Проверяем структуру кэша
+                if 'best_proxy' in cache_data and cache_data['best_proxy']:
+                    proxy_info = cache_data['best_proxy']
+                    self.log_handler.log(f"Найден сохраненный прокси: {proxy_info['url']}", "INFO")
+                    self.log_handler.log(f"  Страна: {proxy_info['country']}, Пинг: {proxy_info['ping']:.0f}ms", "INFO")
+                    return proxy_info
+        except Exception as e:
+            self.log_handler.log(f"Ошибка загрузки кэша прокси: {e}", "WARNING")
+        
+        return None
+    
+    def save_proxy_to_cache(self, proxy_url: str, country: str, ping_ms: float, score: int):
+        """Сохранение лучшего прокси в кэш"""
+        try:
+            cache_data = {
+                'best_proxy': {
+                    'url': proxy_url,
+                    'country': country,
+                    'ping': ping_ms,
+                    'score': score,
+                    'last_updated': datetime.now().isoformat(),
+                    'test_count': 1
+                },
+                'version': '1.0'
+            }
+            
+            # Если файл уже существует, обновляем счетчик использований
+            if os.path.exists(self.PROXY_CACHE_FILE):
+                try:
+                    with open(self.PROXY_CACHE_FILE, 'r', encoding='utf-8') as f:
+                        old_data = json.load(f)
+                        if (old_data.get('best_proxy', {}).get('url') == proxy_url):
+                            cache_data['best_proxy']['test_count'] = old_data.get('best_proxy', {}).get('test_count', 0) + 1
+                except:
+                    pass
+            
+            with open(self.PROXY_CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            
+            self.log_handler.log(f"Прокси сохранен в кэш: {self.PROXY_CACHE_FILE}", "OK")
+        except Exception as e:
+            self.log_handler.log(f"Ошибка сохранения кэша прокси: {e}", "WARNING")
+
     def fetch_proxy_list(self) -> List[Dict]:
         """Получение списка SOCKS4 и SOCKS5 прокси"""
         self.log_handler.log("Загрузка списков прокси...", "INFO")
@@ -141,6 +192,24 @@ class ProxyDownloader:
         """Автоматический выбор рабочего прокси с параллельной проверкой"""
         self.log_handler.log("Начинаю автоматический выбор прокси...", "INFO")
         
+        # Сначала проверяем кэшированный прокси
+        cached_proxy = self.load_cached_proxy()
+        if cached_proxy:
+            self.log_handler.log("Проверяю сохраненный прокси...", "INFO")
+            success, ping_ms = self.test_proxy(cached_proxy['url'])
+            if success:
+                self.log_handler.log(f"✓ Сохраненный прокси работает! Пинг: {ping_ms:.0f}ms", "OK")
+                # Обновляем счетчик использований
+                self.save_proxy_to_cache(
+                    cached_proxy['url'], 
+                    cached_proxy['country'], 
+                    ping_ms, 
+                    cached_proxy['score']
+                )
+                return cached_proxy['url']
+            else:
+                self.log_handler.log("✗ Сохраненный прокси не работает, ищу новый...", "WARNING")
+        
         proxies = self.fetch_proxy_list()
         if not proxies:
             self.log_handler.log("Список прокси пуст", "WARNING")
@@ -207,6 +276,9 @@ class ProxyDownloader:
                 self.log_handler.log(f"Топ-5 лучших прокси по пингу:", "INFO")
                 for i, (url, ctry, scr, png) in enumerate(working_proxies[:5], 1):
                     self.log_handler.log(f"  {i}. {ctry}: {png:.0f}ms (score: {scr})", "INFO")
+            
+            # Сохраняем лучший прокси в кэш
+            self.save_proxy_to_cache(proxy_url, country, ping_ms, score)
             
             return proxy_url
         else:
